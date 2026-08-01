@@ -1,6 +1,7 @@
 -- [[ CONFIGURATION ]] --
-local DISTANCE = 30           -- ระยะทางสูงสุดที่ต้องเข้าใกล้เป้าหมายก่อนถึงจะใช้ Side Dash ได้
+local DISTANCE = 30           -- ระยะทางสูงสุดที่ต้องเข้าใกล้เป้าหมายก่อนถึงจะใช้ Side Dash ได้ (30 Studs)
 local RANGE = 4               -- ระยะห่างที่จะไปหยุดอยู่ด้านหลังเป้าหมาย (4 Studs)
+local SPEED_N = 95            -- ความเร็วในการพุ่ง (95 Studs per second)
 local PREDICTION = 0.1        -- การคาดการณ์การเคลื่อนที่ล่วงหน้า
 
 -- [[ SERVICES ]] --
@@ -53,14 +54,12 @@ highlight.Parent = ScreenGui
 
 -- [[ 1. SELECT TARGET SYSTEM (DOUBLE TAP PLAYER/NPC) ]] --
 local function onTouchOrClick(input, gameProcessed)
-    -- ทำงานเมื่อคลิก/แตะหน้าจอ และไม่ได้กดปุ่ม UI อื่นๆ
     if gameProcessed then return end
     
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
         local unitRay = camera:ScreenPointToRay(input.Position.X, input.Position.Y)
         local raycastParams = RaycastParams.new()
         
-        -- ยกเว้นตัวเราเอง
         if localPlayer.Character then
             raycastParams.FilterDescendantsInstances = {localPlayer.Character}
             raycastParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -79,9 +78,7 @@ local function onTouchOrClick(input, gameProcessed)
                 if humanoid and rootPart then
                     local currentTime = tick()
                     
-                    -- เช็คว่าเป็นการกด (Double Click/Tap) ที่ตัวละครเดิมในเวลาไม่เกิน 0.4 วินาทีหรือไม่
                     if lastClickedModel == model and (currentTime - lastClickTime) <= 0.4 then
-                        -- เลือกเป้าหมายสำเร็จ!
                         selectedTargetModel = model
                         selectedTargetRoot = rootPart
                         highlight.Adornee = selectedTargetModel
@@ -102,7 +99,6 @@ UserInputService.InputBegan:Connect(onTouchOrClick)
 RunService.RenderStepped:Connect(function()
     if selectedTargetModel then
         local humanoid = selectedTargetModel:FindFirstChildOfClass("Humanoid")
-        -- ยกเลิกการเลือกถ้าเป้าหมายตาย หรือโดนลบออก
         if not humanoid or humanoid.Health <= 0 or not selectedTargetModel.Parent then
             selectedTargetModel = nil
             selectedTargetRoot = nil
@@ -111,7 +107,7 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- [[ 2. PERFORM DASH (CHECK DISTANCE 30 BEFORE DASH) ]] --
+-- [[ 2. PERFORM DASH WITH SPEED_N 95 ]] --
 local isDashing = false
 
 local function performBehindDash()
@@ -125,21 +121,24 @@ local function performBehindDash()
     if humanoid and humanoid.PlatformStand then return end
 
     if selectedTargetRoot then
-        -- ตรวจสอบระยะห่างว่าเข้าใกล้เป้าหมายในระยะ DISTANCE (30) แล้วหรือยัง
         local currentDist = (myRoot.Position - selectedTargetRoot.Position).Magnitude
         
         if currentDist <= DISTANCE then
             isDashing = true
 
-            -- คำนวณพิกัดด้านหลังเป้าหมาย (RANGE = 4)
+            -- คำนวณพิกัดเป้าหมายด้านหลัง (RANGE = 4)
             local targetVelocity = selectedTargetRoot.AssemblyLinearVelocity or Vector3.new(0, 0, 0)
             local predictedPos = selectedTargetRoot.Position + (targetVelocity * PREDICTION)
             local targetLookVector = selectedTargetRoot.CFrame.LookVector
             local behindPos = predictedPos - (targetLookVector * RANGE)
             behindPos = Vector3.new(behindPos.X, selectedTargetRoot.Position.Y, behindPos.Z)
 
-            -- พุ่งไปข้างหลัง
-            local tweenInfo = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+            -- คำนวณระยะทางที่จะพุ่งและใช้ SPEED_N คำนวณระยะเวลา (Duration)
+            local dashDistance = (myRoot.Position - behindPos).Magnitude
+            local duration = math.max(dashDistance / SPEED_N, 0.05) -- ป้องกันค่าเป็น 0
+
+            -- พุ่งไปด้วยความเร็ว SPEED_N (95)
+            local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear)
             local tween = TweenService:Create(myRoot, tweenInfo, {
                 CFrame = CFrame.new(behindPos, predictedPos)
             })
@@ -149,7 +148,7 @@ local function performBehindDash()
             
             isDashing = false
         else
-            print("[Select Dash] Out of Distance! You are " .. math.floor(currentDist) .. " studs away (Max: " .. DISTANCE .. ")")
+            print("[Select Dash] Out of Distance! Current: " .. math.floor(currentDist) .. " Studs (Max: " .. DISTANCE .. ")")
         end
     else
         print("[Select Dash] No target selected! Double tap a player/NPC first.")
@@ -167,4 +166,4 @@ DashButton.MouseButton1Click:Connect(function()
     performBehindDash()
 end)
 
-print("[Select Target Mode] Double-tap Player/NPC to select target!")
+print("[Select Target Mode] SpeedN set to 95 Studs/Sec!")
