@@ -1,20 +1,27 @@
--- [[ CONFIGURATION (BATTLEGROUND VERSION - FIXED HIGHLIGHT) ]] --
-local DISTANCE = 50           -- เพิ่มระยะตรวจจับให้กว้างขึ้น
-local RANGE = 4               -- ระยะหยุดด้านหลัง
-local PREDICTION = 0.1        -- การคาดการณ์ล่วงหน้า
+-- [[ CONFIGURATION ]] --
+local DISTANCE = 30           -- ระยะทางสูงสุดที่ต้องเข้าใกล้เป้าหมายก่อนถึงจะใช้ Side Dash ได้
+local RANGE = 4               -- ระยะห่างที่จะไปหยุดอยู่ด้านหลังเป้าหมาย (4 Studs)
+local PREDICTION = 0.1        -- การคาดการณ์การเคลื่อนที่ล่วงหน้า
 
 -- [[ SERVICES ]] --
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
 
 local localPlayer = Players.LocalPlayer
+local camera = Workspace.CurrentCamera
 
--- [[ CREATE UI BUTTON ]] --
+-- [[ SELECTED TARGET VARIABLES ]] --
+local selectedTargetModel = nil
+local selectedTargetRoot = nil
+local lastClickTime = 0
+local lastClickedModel = nil
+
+-- [[ CREATE UI BUTTON FOR DASH ]] --
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "BattlegroundDashGui"
+ScreenGui.Name = "SelectDashGui"
 ScreenGui.Parent = localPlayer:WaitForChild("PlayerGui")
 ScreenGui.ResetOnSpawn = false
 
@@ -35,63 +42,76 @@ local ButtonCorner = Instance.new("UICorner")
 ButtonCorner.CornerRadius = UDim.new(1, 0)
 ButtonCorner.Parent = DashButton
 
--- [[ FIXED HIGHLIGHT SYSTEM ]] --
+-- [[ HIGHLIGHT FOR SELECTED TARGET ]] --
 local highlight = Instance.new("Highlight")
-highlight.Name = "BattlegroundHighlight"
+highlight.Name = "TargetSelectHighlight"
 highlight.FillColor = Color3.fromRGB(255, 0, 0)
-highlight.FillTransparency = 0.4
+highlight.FillTransparency = 0.3
 highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
 highlight.OutlineTransparency = 0
-highlight.Parent = ScreenGui -- ย้ายมาไว้ที่ ScreenGui หรือ CoreGui เพื่อบังคับให้เรนเดอร์
+highlight.Parent = ScreenGui
 
--- [[ FIND TARGET (IMPROVED SEARCH) ]] --
-local function getNearestTarget()
-    local character = localPlayer.Character
-    if not character or not character:FindFirstChild("HumanoidRootPart") then return nil, nil end
-    local myRoot = character.HumanoidRootPart
-
-    local nearestTargetModel = nil
-    local nearestTargetRoot = nil
-    local shortestDistance = DISTANCE
-
-    -- ค้นหาทั้งใน Workspace และโฟลเดอร์ผู้เล่นทั่วไป
-    for _, obj in ipairs(Workspace:GetChildren()) do
-        if obj ~= character and obj:IsA("Model") then
-            local humanoid = obj:FindFirstChildOfClass("Humanoid")
-            local targetRoot = obj:FindFirstChild("HumanoidRootPart")
+-- [[ 1. SELECT TARGET SYSTEM (DOUBLE TAP PLAYER/NPC) ]] --
+local function onTouchOrClick(input, gameProcessed)
+    -- ทำงานเมื่อคลิก/แตะหน้าจอ และไม่ได้กดปุ่ม UI อื่นๆ
+    if gameProcessed then return end
+    
+    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        local unitRay = camera:ScreenPointToRay(input.Position.X, input.Position.Y)
+        local raycastParams = RaycastParams.new()
+        
+        -- ยกเว้นตัวเราเอง
+        if localPlayer.Character then
+            raycastParams.FilterDescendantsInstances = {localPlayer.Character}
+            raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+        end
+        
+        local rayResult = Workspace:Raycast(unitRay.Origin, unitRay.Direction * 1000, raycastParams)
+        
+        if rayResult and rayResult.Instance then
+            local hitPart = rayResult.Instance
+            local model = hitPart:FindFirstAncestorOfClass("Model")
             
-            if humanoid and humanoid.Health > 0 and targetRoot then
-                local isPlayer = Players:GetPlayerFromCharacter(obj)
-                -- อนุญาตให้ล็อคได้ทั้ง Player อื่น และ Dummy ฝึกซ้อมในแมพ
-                if not isPlayer or isPlayer ~= localPlayer then
-                    local dist = (myRoot.Position - targetRoot.Position).Magnitude
-                    if dist <= shortestDistance then
-                        shortestDistance = dist
-                        nearestTargetModel = obj
-                        nearestTargetRoot = targetRoot
+            if model then
+                local humanoid = model:FindFirstChildOfClass("Humanoid")
+                local rootPart = model:FindFirstChild("HumanoidRootPart")
+                
+                if humanoid and rootPart then
+                    local currentTime = tick()
+                    
+                    -- เช็คว่าเป็นการกด (Double Click/Tap) ที่ตัวละครเดิมในเวลาไม่เกิน 0.4 วินาทีหรือไม่
+                    if lastClickedModel == model and (currentTime - lastClickTime) <= 0.4 then
+                        -- เลือกเป้าหมายสำเร็จ!
+                        selectedTargetModel = model
+                        selectedTargetRoot = rootPart
+                        highlight.Adornee = selectedTargetModel
+                        print("[Select Target] Target Locked: " .. model.Name)
+                    else
+                        lastClickTime = currentTime
+                        lastClickedModel = model
                     end
                 end
             end
         end
     end
-
-    return nearestTargetRoot, nearestTargetModel
 end
 
--- [[ REAL-TIME HIGHLIGHT UPDATER ]] --
+UserInputService.InputBegan:Connect(onTouchOrClick)
+
+-- [[ UPDATE HIGHLIGHT & DESELECT IF DEAD ]] --
 RunService.RenderStepped:Connect(function()
-    pcall(function()
-        local _, targetModel = getNearestTarget()
-        if targetModel then
-            -- บังคับให้ Highlight จับคู่กับ Model ของเป้าหมายโดยตรง
-            highlight.Adornee = targetModel
-        else
+    if selectedTargetModel then
+        local humanoid = selectedTargetModel:FindFirstChildOfClass("Humanoid")
+        -- ยกเลิกการเลือกถ้าเป้าหมายตาย หรือโดนลบออก
+        if not humanoid or humanoid.Health <= 0 or not selectedTargetModel.Parent then
+            selectedTargetModel = nil
+            selectedTargetRoot = nil
             highlight.Adornee = nil
         end
-    end)
+    end
 end)
 
--- [[ SAFE DASH SYSTEM ]] --
+-- [[ 2. PERFORM DASH (CHECK DISTANCE 30 BEFORE DASH) ]] --
 local isDashing = false
 
 local function performBehindDash()
@@ -104,31 +124,39 @@ local function performBehindDash()
 
     if humanoid and humanoid.PlatformStand then return end
 
-    local targetRoot, _ = getNearestTarget()
-    if targetRoot then
-        isDashing = true
+    if selectedTargetRoot then
+        -- ตรวจสอบระยะห่างว่าเข้าใกล้เป้าหมายในระยะ DISTANCE (30) แล้วหรือยัง
+        local currentDist = (myRoot.Position - selectedTargetRoot.Position).Magnitude
+        
+        if currentDist <= DISTANCE then
+            isDashing = true
 
-        local targetVelocity = targetRoot.AssemblyLinearVelocity or Vector3.new(0, 0, 0)
-        local predictedPos = targetRoot.Position + (targetVelocity * PREDICTION)
-        local targetLookVector = targetRoot.CFrame.LookVector
-        local behindPos = predictedPos - (targetLookVector * RANGE)
-        behindPos = Vector3.new(behindPos.X, targetRoot.Position.Y, behindPos.Z)
+            -- คำนวณพิกัดด้านหลังเป้าหมาย (RANGE = 4)
+            local targetVelocity = selectedTargetRoot.AssemblyLinearVelocity or Vector3.new(0, 0, 0)
+            local predictedPos = selectedTargetRoot.Position + (targetVelocity * PREDICTION)
+            local targetLookVector = selectedTargetRoot.CFrame.LookVector
+            local behindPos = predictedPos - (targetLookVector * RANGE)
+            behindPos = Vector3.new(behindPos.X, selectedTargetRoot.Position.Y, behindPos.Z)
 
-        local tweenInfo = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-        local dashTween = TweenInfo.new()
-        
-        local tween = TweenService:Create(myRoot, TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-            CFrame = CFrame.new(behindPos, predictedPos)
-        })
-        
-        tween:Play()
-        tween.Completed:Wait()
-        
-        isDashing = false
+            -- พุ่งไปข้างหลัง
+            local tweenInfo = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+            local tween = TweenService:Create(myRoot, tweenInfo, {
+                CFrame = CFrame.new(behindPos, predictedPos)
+            })
+            
+            tween:Play()
+            tween.Completed:Wait()
+            
+            isDashing = false
+        else
+            print("[Select Dash] Out of Distance! You are " .. math.floor(currentDist) .. " studs away (Max: " .. DISTANCE .. ")")
+        end
+    else
+        print("[Select Dash] No target selected! Double tap a player/NPC first.")
     end
 end
 
--- [[ INPUTS ]] --
+-- [[ INPUT TRIGGERS ]] --
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if not gameProcessed and input.KeyCode == Enum.KeyCode.C then
         performBehindDash()
@@ -139,4 +167,4 @@ DashButton.MouseButton1Click:Connect(function()
     performBehindDash()
 end)
 
-print("[Side Dash Assist] Highlight Fix Applied Successfully!")
+print("[Select Target Mode] Double-tap Player/NPC to select target!")
