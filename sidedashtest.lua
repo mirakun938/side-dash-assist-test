@@ -1,7 +1,6 @@
 -- [[ CONFIGURATION ]] --
-local RANGE = 4               -- ระยะเริ่มตรวจจับเป้าหมาย
-local DISTANCE = 30           -- ระยะทางที่จะอ้อมไปข้างหลังเป้าหมาย
-local REACH = 0
+local DISTANCE = 30           -- ระยะเริ่มตรวจจับเป้าหมายที่แท้จริง (สแกนหาในรัศมี 30)
+local RANGE = 4               -- ระยะห่างด้านหลังเป้าหมายที่จะไปหยุดอยู่ (4 Studs)
 local SPEED_N = 95            -- ความเร็วในการพุ่ง
 local DURATION = 0.25         -- ระยะเวลาพุ่ง
 local PREDICTION = 0.4        -- การคาดการณ์การเคลื่อนที่ล่วงหน้าของเป้าหมาย
@@ -47,7 +46,7 @@ highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
 highlight.OutlineTransparency = 0
 highlight.Parent = ScreenGui
 
--- [[ FIND NEAREST TARGET ]] --
+-- [[ FIND NEAREST TARGET (USING DISTANCE FOR DETECTION) ]] --
 local function getNearestTarget()
     local character = localPlayer.Character
     if not character or not character:FindFirstChild("HumanoidRootPart") then return nil, nil end
@@ -55,7 +54,7 @@ local function getNearestTarget()
 
     local nearestTargetModel = nil
     local nearestTargetRoot = nil
-    local shortestDistance = RANGE
+    local shortestDistance = DISTANCE -- ใช้ระยะ 30 เป็นตัวสแกนหาเป้าหมาย
 
     for _, obj in ipairs(Workspace:GetChildren()) do
         if obj ~= character and obj:IsA("Model") then
@@ -107,7 +106,8 @@ local function performBehindDash()
         local predictedPos = targetRoot.Position + (targetVelocity * PREDICTION)
 
         local targetLookVector = targetRoot.CFrame.LookVector
-        local behindPos = predictedPos - (targetLookVector * DISTANCE)
+        -- ใช้ RANGE (4) เป็นระยะห่างด้านหลังเป้าหมายที่จะไปหยุด
+        local behindPos = predictedPos - (targetLookVector * RANGE)
         behindPos = Vector3.new(behindPos.X, targetRoot.Position.Y, behindPos.Z)
 
         local startTime = tick()
@@ -129,7 +129,7 @@ local function performBehindDash()
             end
         end)
     else
-        print("[Side Dash] No target found within range (" .. RANGE .. ")!")
+        print("[Side Dash] No target found within detection distance (" .. DISTANCE .. ")!")
     end
 end
 
@@ -144,4 +144,4 @@ DashButton.MouseButton1Click:Connect(function()
     performBehindDash()
 end)
 
-print("[Side Dash Assist] Target Nearest Mode Loaded!")
+print("[Side Dash Assist] Loaded with Correct Distance (30) & Range (4)!")
