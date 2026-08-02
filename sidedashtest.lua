@@ -1,11 +1,12 @@
 -- [[ CONFIGURATION ]] --
 local DISTANCE = 30           -- ระยะทางสูงสุดที่ต้องเข้าใกล้เป้าหมายก่อนถึงจะใช้ Side Dash ได้ (30 Studs)
 local RANGE = 4               -- ระยะห่างที่จะไปหยุดอยู่ด้านหลังเป้าหมาย (4 Studs)
-local SPEED_N = 95            -- ความเร็วในการพุ่ง (95 Studs per second)
+local SPEED_N = 95            -- ความเร็วตั้งต้นในการพุ่ง (95 Studs per second)
 local PREDICTION = 0.1        -- การคาดการณ์การเคลื่อนที่ล่วงหน้า
 
--- 🎬 ใส่ ID อนิเมชั่นตรงนี้ (เช่น "rbxassetid://1234567890" หรือใส่แค่ตัวเลข "1234567890")
-local DASH_ANIMATION_ID = "0" 
+-- 🎬 ช่องใส่ ID Animation (ใส่ตัวเลข ID ได้เลยครับ)
+local ANIMATION_LEFT = "0"    -- เล่นเมื่อเป้าหมายอยู่ฝั่ง "ซ้าย" ของหน้าจอ
+local ANIMATION_RIGHT = "0"   -- เล่นเมื่อเป้าหมายอยู่ฝั่ง "ขวา" ของหน้าจอ
 
 -- [[ SERVICES ]] --
 local Players = game:GetService("Players")
@@ -23,26 +24,34 @@ local selectedTargetRoot = nil
 local lastClickTime = 0
 local lastClickedModel = nil
 
--- [[ ANIMATION SYSTEM ]] --
-local dashAnimObject = Instance.new("Animation")
-local currentAnimTrack = nil
+-- [[ DUAL ANIMATION SYSTEM ]] --
+local animObjLeft = Instance.new("Animation")
+local animObjRight = Instance.new("Animation")
 
-local function setupAnimationTrack(humanoid)
+local function playSideAnimation(humanoid, side)
     if not humanoid then return nil end
     local animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", humanoid)
     
-    if DASH_ANIMATION_ID ~= "" and DASH_ANIMATION_ID ~= "0" then
-        local formattedId = DASH_ANIMATION_ID
+    local animId = (side == "Left") and ANIMATION_LEFT or ANIMATION_RIGHT
+    local animObject = (side == "Left") and animObjLeft or animObjRight
+    
+    if animId ~= "" and animId ~= "0" then
+        local formattedId = animId
         if not string.find(formattedId, "rbxassetid://") then
             formattedId = "rbxassetid://" .. formattedId
         end
-        dashAnimObject.AnimationId = formattedId
+        animObject.AnimationId = formattedId
         
-        pcall(function()
-            currentAnimTrack = animator:LoadAnimation(dashAnimObject)
-            currentAnimTrack.Priority = Enum.AnimationPriority.Action
+        local success, track = pcall(function()
+            local trk = animator:LoadAnimation(animObject)
+            trk.Priority = Enum.AnimationPriority.Action
+            trk:Play()
+            return trk
         end)
+        
+        if success then return track end
     end
+    return nil
 end
 
 -- [[ CREATE UI BUTTON FOR DASH ]] --
@@ -132,7 +141,7 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- [[ 2. PERFORM DASH WITH SPEED_N 95 & ANIMATION ]] --
+-- [[ 2. PERFORM DASH WITH DUAL ANIMATION & DECELERATION ]] --
 local isDashing = false
 
 local function performBehindDash()
@@ -151,11 +160,13 @@ local function performBehindDash()
         if currentDist <= DISTANCE then
             isDashing = true
 
-            -- เล่น Animation ถ้าใส่ ID ไว้
-            setupAnimationTrack(humanoid)
-            if currentAnimTrack then
-                currentAnimTrack:Play()
-            end
+            -- ตรวจสอบว่าเป้าหมายอยู่ฝั่งซ้ายหรือขวาของหน้าจอ (Screen Position)
+            local screenPos, onScreen = camera:WorldToViewportPoint(selectedTargetRoot.Position)
+            local screenWidth = camera.ViewportSize.X
+            local side = (screenPos.X < screenWidth / 2) and "Left" or "Right"
+
+            -- เล่น Animation ตามฝั่งหน้าจอที่เป้าหมายอยู่
+            local activeTrack = playSideAnimation(humanoid, side)
 
             -- คำนวณพิกัดเป้าหมายด้านหลัง (RANGE = 4)
             local targetVelocity = selectedTargetRoot.AssemblyLinearVelocity or Vector3.new(0, 0, 0)
@@ -164,12 +175,17 @@ local function performBehindDash()
             local behindPos = predictedPos - (targetLookVector * RANGE)
             behindPos = Vector3.new(behindPos.X, selectedTargetRoot.Position.Y, behindPos.Z)
 
-            -- คำนวณระยะทางที่จะพุ่งและใช้ SPEED_N (95)
+            -- คำนวณระยะทางและเวลา
             local dashDistance = (myRoot.Position - behindPos).Magnitude
-            local duration = math.max(dashDistance / SPEED_N, 0.05)
+            local baseDuration = math.max(dashDistance / SPEED_N, 0.05)
 
-            -- พุ่งไปด้วยความเร็ว SPEED_N
-            local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear)
+            -- ปรับใช้ Quad + Out เพื่อให้พุ่งเร็วช่วงแรก และค่อยๆ ชะลอความเร็วลงเมื่อใกล้ถึงเป้าหมาย
+            local tweenInfo = TweenInfo.new(
+                baseDuration * 1.25,
+                Enum.EasingStyle.Quad,
+                Enum.EasingDirection.Out
+            )
+
             local tween = TweenService:Create(myRoot, tweenInfo, {
                 CFrame = CFrame.new(behindPos, predictedPos)
             })
@@ -178,8 +194,8 @@ local function performBehindDash()
             tween.Completed:Wait()
 
             -- หยุด Animation เมื่อแดชเสร็จสิ้น
-            if currentAnimTrack then
-                currentAnimTrack:Stop()
+            if activeTrack then
+                activeTrack:Stop()
             end
             
             isDashing = false
@@ -202,4 +218,4 @@ DashButton.MouseButton1Click:Connect(function()
     performBehindDash()
 end)
 
-print("[Select Target Mode] Animation Play Function Added!")
+print("[Select Target Mode] Dual Screen-Based Animation System Loaded!")
