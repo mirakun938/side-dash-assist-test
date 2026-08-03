@@ -1,19 +1,19 @@
 -- [[ CONFIGURATION ]] --
-local DISTANCE = 30           -- ระยะทางสูงสุดที่เข้าใกล้เป้าหมายแล้วใช้ได้ (30 Studs)
-local RANGE = 4               -- ระยะห่างที่จะไปหยุดอยู่ด้านหลังเป้าหมาย (4 Studs)
+local MAX_DISTANCE = 30       -- ระยะสแกนไกลสุด
+local SPIN_TRIGGER_DIST = 12  -- ระยะเริ่มทำการหมุนวนรอบตัว 1 รอบ (Distance 12)
+local RANGE = 4               -- ระยะหยุดหลังเป้าหมาย (4 Studs)
 local SPEED_N = 95            -- ความเร็วในการพุ่ง
 local PREDICTION = 0.1        -- การคาดการณ์การเคลื่อนที่ล่วงหน้า
-local ARC_OFFSET = 12         -- ความกว้างของวงโค้งตอนพุ่งอ้อม (ยิ่งเยอะยิ่งโค้งกว้าง)
+local ARC_OFFSET = 12         -- ความกว้างของวงโค้งช่วงไกล
 
 -- 🎬 ID Animation ฝั่งซ้าย/ขวา
-local ANIMATION_LEFT = "0"    -- ID ท่าแดชอ้อมฝั่งซ้าย
-local ANIMATION_RIGHT = "0"   -- ID ท่าแดชอ้อมฝั่งขวา
+local ANIMATION_LEFT = "0"
+local ANIMATION_RIGHT = "0"
 
 -- [[ SERVICES ]] --
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
 local localPlayer = Players.LocalPlayer
@@ -56,7 +56,7 @@ end
 
 -- [[ CREATE UI BUTTON ]] --
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "ArcDashGui"
+ScreenGui.Name = "SpinDashGui"
 ScreenGui.Parent = localPlayer:WaitForChild("PlayerGui")
 ScreenGui.ResetOnSpawn = false
 
@@ -86,7 +86,7 @@ highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
 highlight.OutlineTransparency = 0
 highlight.Parent = ScreenGui
 
--- [[ 1. SELECT TARGET SYSTEM (DOUBLE TAP) ]] --
+-- [[ SELECT TARGET SYSTEM ]] --
 local function onTouchOrClick(input, gameProcessed)
     if gameProcessed then return end
     
@@ -140,12 +140,12 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- [[ QUADRATIC BEZIER CURVE FUNCTION ]] --
+-- [[ BEZIER CURVE HELPER ]] --
 local function getQuadraticBezierPoint(p0, p1, p2, t)
     return (1 - t)^2 * p0 + 2 * (1 - t) * t * p1 + t^2 * p2
 end
 
--- [[ 2. ARC SIDE DASH SYSTEM ]] --
+-- [[ 2-STAGE SPIN DASH SYSTEM ]] --
 local isDashing = false
 
 local function performBehindDash()
@@ -161,73 +161,97 @@ local function performBehindDash()
     if selectedTargetRoot then
         local currentDist = (myRoot.Position - selectedTargetRoot.Position).Magnitude
         
-        if currentDist <= DISTANCE then
+        if currentDist <= MAX_DISTANCE then
             isDashing = true
 
-            -- 1. เช็คตำแหน่งเป้าหมายบนหน้าจอ (เพื่อเลือกฝั่งโค้ง ซ้าย หรือ ขวา)
+            -- 1. ตรวจสอบทิศทางฝั่งหน้าจอเพื่อเลือกทิศการหมุนวน
             local screenPos = camera:WorldToViewportPoint(selectedTargetRoot.Position)
             local screenWidth = camera.ViewportSize.X
             local isLeft = (screenPos.X < screenWidth / 2)
-            local sideName = isLeft and "Left" or "Right"
-
-            -- 2. เล่น Animation
+            
+            local sideName = isLeft and "Right" or "Left"
             local activeTrack = playSideAnimation(humanoid, sideName)
 
-            -- 3. คำนวณจุดเริ่มต้น (P0) และ จุดสิ้นสุดหลังเป้าหมาย (P2)
-            local startPos = myRoot.Position
+            -- 2. คำนวณพิกัดศัตรู
             local targetVelocity = selectedTargetRoot.AssemblyLinearVelocity or Vector3.new(0, 0, 0)
             local predictedTargetPos = selectedTargetRoot.Position + (targetVelocity * PREDICTION)
-            local targetLookVector = selectedTargetRoot.CFrame.LookVector
-            
-            -- จุดหยุดหลังเป้าหมาย (Distance = RANGE = 4)
-            local endPos = predictedTargetPos - (targetLookVector * RANGE)
-            endPos = Vector3.new(endPos.X, selectedTargetRoot.Position.Y, endPos.Z)
 
-            -- 4. คำนวณจุดดึงเส้นโค้ง (Control Point - P1)
-            local midPoint = (startPos + endPos) / 2
-            local targetRightVector = selectedTargetRoot.CFrame.RightVector
-            
-            -- ถ้าอยู่ซ้ายหน้าจอ โค้งเบี่ยงออกทางซ้าย / ถ้าอยู่ขวาหน้าจอ โค้งเบี่ยงออกทางขวา
-            local curveDirection = isLeft and -targetRightVector or targetRightVector
-            local controlPos = midPoint + (curveDirection * ARC_OFFSET)
-
-            -- 5. คำนวณเวลาและระยะทางวิถีโค้ง
-            local approxDistance = (startPos - controlPos).Magnitude + (controlPos - endPos).Magnitude
-            local baseDuration = math.max(approxDistance / SPEED_N, 0.1)
-
-            -- 6. ทำการเคลื่อนที่แบบเส้นโค้ง (Arc Movement) พร้อมชะลอตอนท้าย
-            local startTime = tick()
-            local connection
-            
-            connection = RunService.RenderStepped:Connect(function()
-                local elapsed = tick() - startTime
-                local rawT = math.clamp(elapsed / baseDuration, 0, 1)
+            -- [[ ระยะที่ 1: แดชโค้งทางไกล (ถ้าอยู่ไกลเกิน 12 Studs) ]] --
+            if currentDist > SPIN_TRIGGER_DIST then
+                local startPos = myRoot.Position
+                local targetLook = selectedTargetRoot.CFrame.LookVector
+                local tempEndPos = predictedTargetPos - (targetLook * SPIN_TRIGGER_DIST)
                 
-                -- ชะลอความเร็วตอนใกล้ถึงจุดหมาย (Ease Out Quad)
-                local t = 1 - (1 - rawT) * (1 - rawT)
-                
-                -- คำนวณตำแหน่งบนเส้นโค้ง ณ เวลา t
-                local currentArcPos = getQuadraticBezierPoint(startPos, controlPos, endPos, t)
-                
-                -- หันหน้าไปทิศทางเป้าหมายระหว่างพุ่งโค้ง
-                myRoot.CFrame = CFrame.new(currentArcPos, predictedTargetPos)
+                local midPoint = (startPos + tempEndPos) / 2
+                local targetRight = selectedTargetRoot.CFrame.RightVector
+                local curveDir = isLeft and targetRight or -targetRight
+                local controlPos = midPoint + (curveDir * ARC_OFFSET)
 
-                if rawT >= 1 then
-                    connection:Disconnect()
-                    -- ปรับ CFrame ขั้นสุดท้ายให้หันเข้าหลังเป้าหมายเป๊ะๆ
-                    myRoot.CFrame = CFrame.new(endPos, predictedTargetPos)
+                local approxDist = (startPos - controlPos).Magnitude + (controlPos - tempEndPos).Magnitude
+                local stage1Duration = math.max(approxDist / SPEED_N, 0.08)
+
+                local startTime = tick()
+                while (tick() - startTime) < stage1Duration do
+                    local elapsed = tick() - startTime
+                    local rawT = math.clamp(elapsed / stage1Duration, 0, 1)
+                    local t = 1 - (1 - rawT) * (1 - rawT)
                     
-                    if activeTrack then
-                        activeTrack:Stop()
-                    end
-                    isDashing = false
+                    local currentArcPos = getQuadraticBezierPoint(startPos, controlPos, tempEndPos, t)
+                    -- ล็อคสายตามองเป้าหมายตลอดเวลา
+                    myRoot.CFrame = CFrame.new(currentArcPos, predictedTargetPos)
+                    RunService.RenderStepped:Wait()
                 end
-            end)
+            end
+
+            -- [[ ระยะที่ 2: หมุนวนวนรอบศัตรู 1 รอบ (Spin Around Target - Distance 12) ]] --
+            local spinCenter = predictedTargetPos
+            local radius = RANGE -- รัศมีหมุนวนอ้อมหลัง (4 Studs)
+            
+            -- คำนวณมุมเริ่มต้นและมุมจบ (หมุนครบ 360 องศาเพื่ออ้อมไปด้านหลัง)
+            local startOffset = myRoot.Position - spinCenter
+            local startAngle = math.atan2(startOffset.Z, startOffset.X)
+            
+            -- หมุนวน 1 รอบเต็ม (2 * pi)
+            local spinDirection = isLeft and 1 or -1
+            local totalSpinAngle = (math.pi * 2) * spinDirection 
+
+            local spinArcLength = (2 * math.pi * radius)
+            local spinDuration = math.max(spinArcLength / (SPEED_N * 0.8), 0.15)
+
+            local spinStartTime = tick()
+            while (tick() - spinStartTime) < spinDuration do
+                local elapsed = tick() - spinStartTime
+                local rawT = math.clamp(elapsed / spinDuration, 0, 1)
+                local t = 1 - (1 - rawT) * (1 - rawT) -- ชะลอความเร็วตอนท้าย
+                
+                local currentAngle = startAngle + (totalSpinAngle * t)
+                local newX = spinCenter.X + math.cos(currentAngle) * radius
+                local newZ = spinCenter.Z + math.sin(currentAngle) * radius
+                local currentSpinPos = Vector3.new(newX, selectedTargetRoot.Position.Y, newZ)
+
+                -- ล็อคหันหน้าเข้าหาเป้าหมายตลอดเวลาที่หมุนวน
+                myRoot.CFrame = CFrame.new(currentSpinPos, predictedTargetPos)
+                RunService.RenderStepped:Wait()
+            end
+
+            -- [[ จบการทำงาน: ปรับ CFrame ขั้นสุดท้าย ให้ล็อคมองเป้าหมายชัวร์ 100% ]] --
+            local finalLook = selectedTargetRoot.CFrame.LookVector
+            local finalBehindPos = predictedTargetPos - (finalLook * RANGE)
+            finalBehindPos = Vector3.new(finalBehindPos.X, selectedTargetRoot.Position.Y, finalBehindPos.Z)
+            
+            -- ล็อคหันหน้าเข้าหาเป้าหมาย (Lock On)
+            myRoot.CFrame = CFrame.new(finalBehindPos, predictedTargetPos)
+
+            if activeTrack then
+                activeTrack:Stop()
+            end
+            
+            isDashing = false
         else
-            print("[Arc Dash] Out of Distance! Max: " .. DISTANCE)
+            print("[Spin Dash] Out of Distance! Max: " .. MAX_DISTANCE)
         end
     else
-        print("[Arc Dash] No target selected! Double tap a player/NPC first.")
+        print("[Spin Dash] No target selected! Double tap a player/NPC first.")
     end
 end
 
@@ -242,4 +266,4 @@ DashButton.MouseButton1Click:Connect(function()
     performBehindDash()
 end)
 
-print("[Arc Dash] Curve Side Dash Loaded Successfully!")
+print("[Spin Dash] 2-Stage Spin Dash System Loaded!")
