@@ -3,8 +3,9 @@ local DISTANCE = 30           -- ระยะทางสูงสุดที�
 local RANGE = 4               -- ระยะห่างที่จะไปหยุดอยู่ด้านหลังเป้าหมาย (4 Studs)
 local SPEED_N = 95            -- ความเร็วตั้งต้นในการพุ่ง (95 Studs per second)
 local PREDICTION = 0.1        -- การคาดการณ์การเคลื่อนที่ล่วงหน้า
+local CURVE_OFFSET = 12       -- ระยะความโค้งที่พุ่งออกไปด้านข้าง (ยิ่งเยอะยิ่งโค้งกว้าง)
 
--- 🎬 ช่องใส่ ID Animation (ใส่ตัวเลข ID ได้เลยครับ)
+-- 🎬 ช่องใส่ ID Animation
 local ANIMATION_LEFT = "0"    -- เล่นเมื่อเป้าหมายอยู่ฝั่ง "ซ้าย" ของหน้าจอ
 local ANIMATION_RIGHT = "0"   -- เล่นเมื่อเป้าหมายอยู่ฝั่ง "ขวา" ของหน้าจอ
 
@@ -141,7 +142,12 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- [[ 2. PERFORM DASH WITH DUAL ANIMATION & DECELERATION ]] --
+-- [[ BEZIER CURVE CALCULATION (สำหรับพุ่งโค้งแบบในรูป) ]] --
+local function getQuadraticBezierPoint(p0, p1, p2, t)
+    return (1 - t)^2 * p0 + 2 * (1 - t) * t * p1 + t^2 * p2
+end
+
+-- [[ 2. PERFORM CURVE DASH TO BEHIND TARGET ]] --
 local isDashing = false
 
 local function performBehindDash()
@@ -160,45 +166,63 @@ local function performBehindDash()
         if currentDist <= DISTANCE then
             isDashing = true
 
-            -- ตรวจสอบว่าเป้าหมายอยู่ฝั่งซ้ายหรือขวาของหน้าจอ (Screen Position)
-            local screenPos, onScreen = camera:WorldToViewportPoint(selectedTargetRoot.Position)
+            -- ตรวจสอบว่าเป้าหมายอยู่ฝั่งซ้ายหรือขวาของหน้าจอ
+            local screenPos = camera:WorldToViewportPoint(selectedTargetRoot.Position)
             local screenWidth = camera.ViewportSize.X
             local side = (screenPos.X < screenWidth / 2) and "Left" or "Right"
 
-            -- เล่น Animation ตามฝั่งหน้าจอที่เป้าหมายอยู่
+            -- เล่น Animation ตามฝั่ง
             local activeTrack = playSideAnimation(humanoid, side)
 
-            -- คำนวณพิกัดเป้าหมายด้านหลัง (RANGE = 4)
+            -- 1. จุดเริ่มต้น (P0): ตำแหน่งปัจจุบันของเรา
+            local p0 = myRoot.Position
+
+            -- คำนวณตำแหน่งล่วงหน้าของเป้าหมาย
             local targetVelocity = selectedTargetRoot.AssemblyLinearVelocity or Vector3.new(0, 0, 0)
             local predictedPos = selectedTargetRoot.Position + (targetVelocity * PREDICTION)
-            local targetLookVector = selectedTargetRoot.CFrame.LookVector
-            local behindPos = predictedPos - (targetLookVector * RANGE)
-            behindPos = Vector3.new(behindPos.X, selectedTargetRoot.Position.Y, behindPos.Z)
+            local targetCFrame = selectedTargetRoot.CFrame
 
-            -- คำนวณระยะทางและเวลา
-            local dashDistance = (myRoot.Position - behindPos).Magnitude
-            local baseDuration = math.max(dashDistance / SPEED_N, 0.05)
+            -- 2. จุดปลายทาง (P2): อยู่ด้านหลังเป้าหมายที่ระยะ RANGE (4 Studs)
+            local behindPos = predictedPos - (targetCFrame.LookVector * RANGE)
+            local p2 = Vector3.new(behindPos.X, selectedTargetRoot.Position.Y, behindPos.Z)
 
-            -- ปรับใช้ Quad + Out เพื่อให้พุ่งเร็วช่วงแรก และค่อยๆ ชะลอความเร็วลงเมื่อใกล้ถึงเป้าหมาย
-            local tweenInfo = TweenInfo.new(
-                baseDuration * 1.25,
-                Enum.EasingStyle.Quad,
-                Enum.EasingDirection.Out
-            )
+            -- 3. จุดส่วนโค้งด้านข้าง (P1 - Control Point): ฉีกออกไปทางซ้ายของเป้าหมายตามรูปวาด
+            local sideVector = -targetCFrame.RightVector -- ฉีกไปทางฝั่งซ้ายของเป้าหมาย
+            local p1 = targetCFrame.Position + (sideVector * CURVE_OFFSET)
 
-            local tween = TweenService:Create(myRoot, tweenInfo, {
-                CFrame = CFrame.new(behindPos, predictedPos)
-            })
-            
-            tween:Play()
-            tween.Completed:Wait()
+            -- คำนวณระยะทางรวมตามเส้นโค้งเพื่อหาเวลา (Duration)
+            local totalDistance = (p0 - p1).Magnitude + (p1 - p2).Magnitude
+            local duration = math.max(totalDistance / SPEED_N, 0.15)
 
-            -- หยุด Animation เมื่อแดชเสร็จสิ้น
-            if activeTrack then
-                activeTrack:Stop()
-            end
-            
-            isDashing = false
+            -- ทำการเคลื่อนที่แบบเส้นโค้ง (Arc) ด้วย RenderStepped
+            local startTime = tick()
+            local connection
+
+            connection = RunService.RenderStepped:Connect(function()
+                local elapsed = tick() - startTime
+                local alpha = math.clamp(elapsed / duration, 0, 1)
+
+                -- ใช้ Quad Ease Out ชะลอความเร็วช่วงใกล้ถึงจุดหมาย
+                local smoothAlpha = TweenService:GetValue(alpha, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+                -- คำนวณตำแหน่งพิกัดเส้นโค้ง ณ วินาทีนั้นๆ
+                local currentPos = getQuadraticBezierPoint(p0, p1, p2, smoothAlpha)
+                
+                -- หันหน้าเข้าหาเป้าหมายตลอดเวลาขณะกำลังพุ่งโค้ง
+                myRoot.CFrame = CFrame.new(currentPos, predictedPos)
+
+                if alpha >= 1 then
+                    connection:Disconnect()
+                    
+                    -- จบการพุ่ง: หันหน้าเข้าหาด้านหลังเป้าหมายเต็มตัว
+                    myRoot.CFrame = CFrame.new(p2, predictedPos)
+
+                    if activeTrack then
+                        activeTrack:Stop()
+                    end
+                    isDashing = false
+                end
+            end)
         else
             print("[Select Dash] Out of Distance! Current: " .. math.floor(currentDist) .. " Studs (Max: " .. DISTANCE .. ")")
         end
@@ -218,4 +242,4 @@ DashButton.MouseButton1Click:Connect(function()
     performBehindDash()
 end)
 
-print("[Select Target Mode] Dual Screen-Based Animation System Loaded!")
+print("[Select Target Mode] Exact Arc Curve Dash (Bezier Path) Loaded!")
