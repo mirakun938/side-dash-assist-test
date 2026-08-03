@@ -1,13 +1,13 @@
 -- [[ CONFIGURATION ]] --
-local DISTANCE = 30           -- ระยะทางสูงสุดที่ต้องเข้าใกล้เป้าหมายก่อนถึงจะใช้ Side Dash ได้ (30 Studs)
+local DISTANCE = 30           -- ระยะทางสูงสุดที่เข้าใกล้เป้าหมายแล้วใช้ได้ (30 Studs)
 local RANGE = 4               -- ระยะห่างที่จะไปหยุดอยู่ด้านหลังเป้าหมาย (4 Studs)
-local SPEED_N = 95            -- ความเร็วตั้งต้นในการพุ่ง (95 Studs per second)
+local SPEED_N = 95            -- ความเร็วในการพุ่ง
 local PREDICTION = 0.1        -- การคาดการณ์การเคลื่อนที่ล่วงหน้า
-local CURVE_OFFSET = 12       -- ระยะความโค้งที่พุ่งออกไปด้านข้าง (ยิ่งเยอะยิ่งโค้งกว้าง)
+local ARC_OFFSET = 12         -- ความกว้างของวงโค้งตอนพุ่งอ้อม (ยิ่งเยอะยิ่งโค้งกว้าง)
 
--- 🎬 ช่องใส่ ID Animation
-local ANIMATION_LEFT = "0"    -- เล่นเมื่อเป้าหมายอยู่ฝั่ง "ซ้าย" ของหน้าจอ
-local ANIMATION_RIGHT = "0"   -- เล่นเมื่อเป้าหมายอยู่ฝั่ง "ขวา" ของหน้าจอ
+-- 🎬 ID Animation ฝั่งซ้าย/ขวา
+local ANIMATION_LEFT = "0"    -- ID ท่าแดชอ้อมฝั่งซ้าย
+local ANIMATION_RIGHT = "0"   -- ID ท่าแดชอ้อมฝั่งขวา
 
 -- [[ SERVICES ]] --
 local Players = game:GetService("Players")
@@ -25,7 +25,7 @@ local selectedTargetRoot = nil
 local lastClickTime = 0
 local lastClickedModel = nil
 
--- [[ DUAL ANIMATION SYSTEM ]] --
+-- [[ ANIMATION SYSTEM ]] --
 local animObjLeft = Instance.new("Animation")
 local animObjRight = Instance.new("Animation")
 
@@ -49,15 +49,14 @@ local function playSideAnimation(humanoid, side)
             trk:Play()
             return trk
         end)
-        
         if success then return track end
     end
     return nil
 end
 
--- [[ CREATE UI BUTTON FOR DASH ]] --
+-- [[ CREATE UI BUTTON ]] --
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "SelectDashGui"
+ScreenGui.Name = "ArcDashGui"
 ScreenGui.Parent = localPlayer:WaitForChild("PlayerGui")
 ScreenGui.ResetOnSpawn = false
 
@@ -78,7 +77,7 @@ local ButtonCorner = Instance.new("UICorner")
 ButtonCorner.CornerRadius = UDim.new(1, 0)
 ButtonCorner.Parent = DashButton
 
--- [[ HIGHLIGHT FOR SELECTED TARGET ]] --
+-- [[ HIGHLIGHT TARGET ]] --
 local highlight = Instance.new("Highlight")
 highlight.Name = "TargetSelectHighlight"
 highlight.FillColor = Color3.fromRGB(255, 0, 0)
@@ -87,7 +86,7 @@ highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
 highlight.OutlineTransparency = 0
 highlight.Parent = ScreenGui
 
--- [[ 1. SELECT TARGET SYSTEM (DOUBLE TAP PLAYER/NPC) ]] --
+-- [[ 1. SELECT TARGET SYSTEM (DOUBLE TAP) ]] --
 local function onTouchOrClick(input, gameProcessed)
     if gameProcessed then return end
     
@@ -130,7 +129,6 @@ end
 
 UserInputService.InputBegan:Connect(onTouchOrClick)
 
--- [[ UPDATE HIGHLIGHT & DESELECT IF DEAD ]] --
 RunService.RenderStepped:Connect(function()
     if selectedTargetModel then
         local humanoid = selectedTargetModel:FindFirstChildOfClass("Humanoid")
@@ -142,12 +140,12 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- [[ BEZIER CURVE CALCULATION (สำหรับพุ่งโค้งแบบในรูป) ]] --
+-- [[ QUADRATIC BEZIER CURVE FUNCTION ]] --
 local function getQuadraticBezierPoint(p0, p1, p2, t)
     return (1 - t)^2 * p0 + 2 * (1 - t) * t * p1 + t^2 * p2
 end
 
--- [[ 2. PERFORM CURVE DASH TO BEHIND TARGET ]] --
+-- [[ 2. ARC SIDE DASH SYSTEM ]] --
 local isDashing = false
 
 local function performBehindDash()
@@ -166,57 +164,59 @@ local function performBehindDash()
         if currentDist <= DISTANCE then
             isDashing = true
 
-            -- ตรวจสอบว่าเป้าหมายอยู่ฝั่งซ้ายหรือขวาของหน้าจอ
+            -- 1. เช็คตำแหน่งเป้าหมายบนหน้าจอ (เพื่อเลือกฝั่งโค้ง ซ้าย หรือ ขวา)
             local screenPos = camera:WorldToViewportPoint(selectedTargetRoot.Position)
             local screenWidth = camera.ViewportSize.X
-            local side = (screenPos.X < screenWidth / 2) and "Left" or "Right"
+            local isLeft = (screenPos.X < screenWidth / 2)
+            local sideName = isLeft and "Left" or "Right"
 
-            -- เล่น Animation ตามฝั่ง
-            local activeTrack = playSideAnimation(humanoid, side)
+            -- 2. เล่น Animation
+            local activeTrack = playSideAnimation(humanoid, sideName)
 
-            -- 1. จุดเริ่มต้น (P0): ตำแหน่งปัจจุบันของเรา
-            local p0 = myRoot.Position
-
-            -- คำนวณตำแหน่งล่วงหน้าของเป้าหมาย
+            -- 3. คำนวณจุดเริ่มต้น (P0) และ จุดสิ้นสุดหลังเป้าหมาย (P2)
+            local startPos = myRoot.Position
             local targetVelocity = selectedTargetRoot.AssemblyLinearVelocity or Vector3.new(0, 0, 0)
-            local predictedPos = selectedTargetRoot.Position + (targetVelocity * PREDICTION)
-            local targetCFrame = selectedTargetRoot.CFrame
+            local predictedTargetPos = selectedTargetRoot.Position + (targetVelocity * PREDICTION)
+            local targetLookVector = selectedTargetRoot.CFrame.LookVector
+            
+            -- จุดหยุดหลังเป้าหมาย (Distance = RANGE = 4)
+            local endPos = predictedTargetPos - (targetLookVector * RANGE)
+            endPos = Vector3.new(endPos.X, selectedTargetRoot.Position.Y, endPos.Z)
 
-            -- 2. จุดปลายทาง (P2): อยู่ด้านหลังเป้าหมายที่ระยะ RANGE (4 Studs)
-            local behindPos = predictedPos - (targetCFrame.LookVector * RANGE)
-            local p2 = Vector3.new(behindPos.X, selectedTargetRoot.Position.Y, behindPos.Z)
+            -- 4. คำนวณจุดดึงเส้นโค้ง (Control Point - P1)
+            local midPoint = (startPos + endPos) / 2
+            local targetRightVector = selectedTargetRoot.CFrame.RightVector
+            
+            -- ถ้าอยู่ซ้ายหน้าจอ โค้งเบี่ยงออกทางซ้าย / ถ้าอยู่ขวาหน้าจอ โค้งเบี่ยงออกทางขวา
+            local curveDirection = isLeft and -targetRightVector or targetRightVector
+            local controlPos = midPoint + (curveDirection * ARC_OFFSET)
 
-            -- 3. จุดส่วนโค้งด้านข้าง (P1 - Control Point): ฉีกออกไปทางซ้ายของเป้าหมายตามรูปวาด
-            local sideVector = -targetCFrame.RightVector -- ฉีกไปทางฝั่งซ้ายของเป้าหมาย
-            local p1 = targetCFrame.Position + (sideVector * CURVE_OFFSET)
+            -- 5. คำนวณเวลาและระยะทางวิถีโค้ง
+            local approxDistance = (startPos - controlPos).Magnitude + (controlPos - endPos).Magnitude
+            local baseDuration = math.max(approxDistance / SPEED_N, 0.1)
 
-            -- คำนวณระยะทางรวมตามเส้นโค้งเพื่อหาเวลา (Duration)
-            local totalDistance = (p0 - p1).Magnitude + (p1 - p2).Magnitude
-            local duration = math.max(totalDistance / SPEED_N, 0.15)
-
-            -- ทำการเคลื่อนที่แบบเส้นโค้ง (Arc) ด้วย RenderStepped
+            -- 6. ทำการเคลื่อนที่แบบเส้นโค้ง (Arc Movement) พร้อมชะลอตอนท้าย
             local startTime = tick()
             local connection
-
+            
             connection = RunService.RenderStepped:Connect(function()
                 local elapsed = tick() - startTime
-                local alpha = math.clamp(elapsed / duration, 0, 1)
-
-                -- ใช้ Quad Ease Out ชะลอความเร็วช่วงใกล้ถึงจุดหมาย
-                local smoothAlpha = TweenService:GetValue(alpha, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-
-                -- คำนวณตำแหน่งพิกัดเส้นโค้ง ณ วินาทีนั้นๆ
-                local currentPos = getQuadraticBezierPoint(p0, p1, p2, smoothAlpha)
+                local rawT = math.clamp(elapsed / baseDuration, 0, 1)
                 
-                -- หันหน้าเข้าหาเป้าหมายตลอดเวลาขณะกำลังพุ่งโค้ง
-                myRoot.CFrame = CFrame.new(currentPos, predictedPos)
+                -- ชะลอความเร็วตอนใกล้ถึงจุดหมาย (Ease Out Quad)
+                local t = 1 - (1 - rawT) * (1 - rawT)
+                
+                -- คำนวณตำแหน่งบนเส้นโค้ง ณ เวลา t
+                local currentArcPos = getQuadraticBezierPoint(startPos, controlPos, endPos, t)
+                
+                -- หันหน้าไปทิศทางเป้าหมายระหว่างพุ่งโค้ง
+                myRoot.CFrame = CFrame.new(currentArcPos, predictedTargetPos)
 
-                if alpha >= 1 then
+                if rawT >= 1 then
                     connection:Disconnect()
+                    -- ปรับ CFrame ขั้นสุดท้ายให้หันเข้าหลังเป้าหมายเป๊ะๆ
+                    myRoot.CFrame = CFrame.new(endPos, predictedTargetPos)
                     
-                    -- จบการพุ่ง: หันหน้าเข้าหาด้านหลังเป้าหมายเต็มตัว
-                    myRoot.CFrame = CFrame.new(p2, predictedPos)
-
                     if activeTrack then
                         activeTrack:Stop()
                     end
@@ -224,10 +224,10 @@ local function performBehindDash()
                 end
             end)
         else
-            print("[Select Dash] Out of Distance! Current: " .. math.floor(currentDist) .. " Studs (Max: " .. DISTANCE .. ")")
+            print("[Arc Dash] Out of Distance! Max: " .. DISTANCE)
         end
     else
-        print("[Select Dash] No target selected! Double tap a player/NPC first.")
+        print("[Arc Dash] No target selected! Double tap a player/NPC first.")
     end
 end
 
@@ -242,4 +242,4 @@ DashButton.MouseButton1Click:Connect(function()
     performBehindDash()
 end)
 
-print("[Select Target Mode] Exact Arc Curve Dash (Bezier Path) Loaded!")
+print("[Arc Dash] Curve Side Dash Loaded Successfully!")
